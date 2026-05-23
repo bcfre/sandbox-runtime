@@ -86,10 +86,15 @@ enum WfpCmd {
         /// when integrating with externally-managed WFP state.
         #[arg(long)]
         sublayer_guid: Option<String>,
+        /// Loopback port range the sandboxed child may reach
+        /// (`LOW-HIGH`, inclusive; default 60080-60089). The host
+        /// http/socks proxies bind inside this range on Windows.
+        #[arg(long, value_name = "LOW-HIGH")]
+        proxy_port_range: Option<String>,
     },
-    /// Print WFP fence state as JSON: `{state, filters}`. Filters
-    /// are identified by their `providerData` tag, so only
-    /// `--sublayer-guid` is relevant.
+    /// Print WFP fence state as JSON: `{state, filters,
+    /// port_range?}`. Filters are identified by their
+    /// `providerData` tag, so only `--sublayer-guid` is relevant.
     Status {
         #[arg(long)]
         sublayer_guid: Option<String>,
@@ -240,15 +245,26 @@ fn run() -> anyhow::Result<()> {
 
         // ─── wfp ───────────────────────────────────────────────────
         Cmd::Wfp {
-            sub: WfpCmd::Install { group, sublayer_guid },
+            sub:
+                WfpCmd::Install {
+                    group,
+                    sublayer_guid,
+                    proxy_port_range,
+                },
         } => {
             require_elevated()?;
             let gsid = resolve_group_sid(&group)?;
             let sl = resolve_sublayer(&sublayer_guid)?;
-            wfp::install_filters(&sl, &gsid)?;
+            let range = match &proxy_port_range {
+                Some(s) => wfp::parse_port_range(s)
+                    .with_context(|| format!("invalid --proxy-port-range '{s}'"))?,
+                None => wfp::DEFAULT_PROXY_PORT_RANGE,
+            };
+            wfp::install_filters(&sl, &gsid, range)?;
             eprintln!(
                 "srt-win: WFP filters installed (group_sid={gsid}, \
-                 sublayer={sl:?})"
+                 sublayer={sl:?}, proxy_port_range={}-{})",
+                range.0, range.1,
             );
         }
         Cmd::Wfp { sub: WfpCmd::Status { sublayer_guid } } => {

@@ -40,6 +40,9 @@ if (-not (Test-Path $Exe)) {
 $me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 Write-Host "srt-win smoke: exe=$Exe group=$GroupName sublayer=$TestSublayer user_sid=$me"
 $sl = @('--sublayer-guid', $TestSublayer)
+# Explicit so the assertions below are deterministic even if the
+# compiled-in default changes.
+$pr = @('--proxy-port-range', '60080-60089')
 
 function Run([string[]]$argv) {
   & $Exe @argv
@@ -82,8 +85,11 @@ if ($gsBad.state -ne 'absent') {
   throw "unmapped --group-sid expected absent, got $($gsBad.state)"
 }
 
-# ── negative input: invalid SID fails fast with a clear error ───────
+# ── negative input ──────────────────────────────────────────────────
 MustFail @('wfp', 'install', '--group-sid', 'not-a-sid') 'invalid --group-sid'
+MustFail (@('wfp', 'install', '--name', $GroupName, '--proxy-port-range', '100-50') + $sl) 'low>high'
+MustFail (@('wfp', 'install', '--name', $GroupName, '--proxy-port-range', '1-1000') + $sl) 'range too wide'
+MustFail (@('wfp', 'install', '--name', $GroupName, '--proxy-port-range', '60080') + $sl) 'missing dash'
 
 # ═════════════════════════════════════════════════════════════════════
 # WFP lifecycle test — uses $GroupName.
@@ -105,18 +111,34 @@ if ($pre.state -ne 'absent') {
 }
 
 # First install via --name.
-Run (@('wfp', 'install', '--name', $GroupName) + $sl)
+Run (@('wfp', 'install', '--name', $GroupName) + $sl + $pr)
 $ws = J (@('wfp', 'status') + $sl)
 Write-Host "wfp status: $($ws | ConvertTo-Json -Compress)"
 if ($ws.state -ne 'installed') { throw "expected installed, got $($ws.state)" }
 if ($ws.filters -lt 8)         { throw "expected >=8 filters, got $($ws.filters)" }
+if ($ws.port_range[0] -ne 60080 -or $ws.port_range[1] -ne 60089) {
+  throw "expected port_range [60080,60089], got [$($ws.port_range -join ',')]"
+}
 
 # Idempotency: second install via --group-sid path leaves the same
 # filter count.
-Run (@('wfp', 'install', '--group-sid', $gs.sid) + $sl)
+Run (@('wfp', 'install', '--group-sid', $gs.sid) + $sl + $pr)
 $ws2 = J (@('wfp', 'status') + $sl)
 if ($ws2.filters -ne $ws.filters) {
   throw "idempotency: filter count changed $($ws.filters) -> $($ws2.filters)"
+}
+
+# ── --proxy-port-range override round-trips through status ─────────
+Run (@('wfp', 'install', '--name', $GroupName, '--proxy-port-range', '50000-50001') + $sl)
+$wsR = J (@('wfp', 'status') + $sl)
+if ($wsR.port_range[0] -ne 50000 -or $wsR.port_range[1] -ne 50001) {
+  throw "expected port_range [50000,50001], got [$($wsR.port_range -join ',')]"
+}
+# No-flag install: assert the compiled-in DEFAULT_PROXY_PORT_RANGE.
+Run (@('wfp', 'install', '--name', $GroupName) + $sl)
+$wsD = J (@('wfp', 'status') + $sl)
+if ($wsD.port_range[0] -ne 60080 -or $wsD.port_range[1] -ne 60089) {
+  throw "no-flag default expected [60080,60089], got [$($wsD.port_range -join ',')]"
 }
 
 # ── --sublayer-guid isolation ────────────────────────────────────────
@@ -126,7 +148,7 @@ $altGuid = [guid]::NewGuid().ToString()
 if ($env:GITHUB_ENV) {
   Add-Content $env:GITHUB_ENV "SRT_ALT_GUID=$altGuid"
 }
-Run @('wfp', 'install', '--name', $GroupName, '--sublayer-guid', $altGuid)
+Run (@('wfp', 'install', '--name', $GroupName, '--sublayer-guid', $altGuid) + $pr)
 $alt = J @('wfp', 'status', '--sublayer-guid', $altGuid)
 if ($alt.state -ne 'installed') {
   throw "alt sublayer expected installed, got $($alt.state)"
@@ -162,7 +184,7 @@ Run (@('wfp', 'uninstall') + $sl)
 # ═════════════════════════════════════════════════════════════════════
 
 $adminsSid = 'S-1-5-32-544'
-Run (@('wfp', 'install', '--group-sid', $adminsSid) + $sl)
+Run (@('wfp', 'install', '--group-sid', $adminsSid) + $sl + $pr)
 try {
   # Broker-side: this process has Admins enabled, so filter 1
   # (PERMIT group-enabled) should let the connect through.

@@ -32,9 +32,13 @@
 //!      SIDs are ignored by ALLOW ACEs.
 //!
 //!   2. **PERMIT loopback** (weight 0xD) — `IP_REMOTE_ADDRESS` is
-//!      `127.0.0.0/8` (v4) / `::1` (v6). No user condition: anything
-//!      that fell through filters 0 and 1 (i.e. the deny-only
-//!      sandboxed child) can still reach the host proxy.
+//!      `127.0.0.0/8` (v4) / `::1` (v6) **and** `IP_REMOTE_PORT` is
+//!      in `[low, high]` (default 60080–60089). No user condition.
+//!      The sandboxed child reaches the host proxies — which on
+//!      Windows bind inside this range — but not arbitrary
+//!      loopback listeners. (Linux/macOS restrict the child to
+//!      exactly the two proxy ports; this range is the closest
+//!      Windows analogue without per-`initialize()` admin.)
 //!
 //!   3. **BLOCK** (weight 0x1) — SD `O:LSG:LSD:(A;;CC;;;WD)`
 //!      (ALLOW-Everyone). Matches every token; catches the sandboxed
@@ -43,8 +47,9 @@
 //!      — but keeping an `ALE_USER_ID` condition on every filter
 //!      makes enumeration uniform.
 //!
-//! Filters carry a small JSON tag in `providerData` (`{tool, kind}`)
-//! so install/uninstall/status can locate them by enumeration. There
+//! Filters carry a small JSON tag in `providerData` (`{tool, kind,
+//! port_range?}`) so install/uninstall/status can locate them by
+//! enumeration. There
 //! is no marker file: `wfp status` enumerates the live engine; `group
 //! status` queries SAM and the current token directly.
 
@@ -72,16 +77,17 @@ use windows::Win32::NetworkManagement::WindowsFilteringPlatform::{
     FwpmSubLayerAdd0, FwpmSubLayerDeleteByKey0, FwpmTransactionAbort0,
     FwpmTransactionBegin0, FwpmTransactionCommit0, FWPM_ACTION0,
     FWPM_ACTION0_0, FWPM_CONDITION_ALE_USER_ID,
-    FWPM_CONDITION_IP_REMOTE_ADDRESS, FWPM_DISPLAY_DATA0, FWPM_FILTER0,
-    FWPM_FILTER_CONDITION0, FWPM_FILTER_ENUM_TEMPLATE0,
-    FWPM_FILTER_FLAG_PERSISTENT, FWPM_LAYER_ALE_AUTH_CONNECT_V4,
-    FWPM_LAYER_ALE_AUTH_CONNECT_V6, FWPM_SUBLAYER0,
-    FWPM_SUBLAYER_FLAG_PERSISTENT, FWP_ACTION_BLOCK, FWP_ACTION_PERMIT,
-    FWP_ACTION_TYPE, FWP_BYTE_ARRAY16, FWP_BYTE_ARRAY16_TYPE, FWP_BYTE_BLOB,
-    FWP_CONDITION_VALUE0, FWP_CONDITION_VALUE0_0,
-    FWP_FILTER_ENUM_OVERLAPPING, FWP_MATCH_EQUAL,
-    FWP_SECURITY_DESCRIPTOR_TYPE, FWP_UINT64, FWP_V4_ADDR_AND_MASK,
-    FWP_V4_ADDR_MASK, FWP_VALUE0, FWP_VALUE0_0,
+    FWPM_CONDITION_IP_REMOTE_ADDRESS, FWPM_CONDITION_IP_REMOTE_PORT,
+    FWPM_DISPLAY_DATA0, FWPM_FILTER0, FWPM_FILTER_CONDITION0,
+    FWPM_FILTER_ENUM_TEMPLATE0, FWPM_FILTER_FLAG_PERSISTENT,
+    FWPM_LAYER_ALE_AUTH_CONNECT_V4, FWPM_LAYER_ALE_AUTH_CONNECT_V6,
+    FWPM_SUBLAYER0, FWPM_SUBLAYER_FLAG_PERSISTENT, FWP_ACTION_BLOCK,
+    FWP_ACTION_PERMIT, FWP_ACTION_TYPE, FWP_BYTE_ARRAY16,
+    FWP_BYTE_ARRAY16_TYPE, FWP_BYTE_BLOB, FWP_CONDITION_VALUE0,
+    FWP_CONDITION_VALUE0_0, FWP_FILTER_ENUM_OVERLAPPING, FWP_MATCH_EQUAL,
+    FWP_MATCH_RANGE, FWP_RANGE0, FWP_RANGE_TYPE,
+    FWP_SECURITY_DESCRIPTOR_TYPE, FWP_UINT16, FWP_UINT64,
+    FWP_V4_ADDR_AND_MASK, FWP_V4_ADDR_MASK, FWP_VALUE0, FWP_VALUE0_0,
 };
 use windows::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
 use windows::Win32::Security::{
@@ -99,6 +105,19 @@ const GROUP_COMMENT: &str = "sandbox-runtime network sandbox membership";
 /// theirs. {2c5d0ad6-5f3b-4d4e-9b8f-1a3e7c9d0b21}
 pub const DEFAULT_SUBLAYER_GUID: GUID =
     GUID::from_u128(0x2c5d0ad6_5f3b_4d4e_9b8f_1a3e7c9d0b21);
+
+/// Default loopback port range for filter 2. The JS http/socks
+/// proxies bind inside this range on Windows so the sandboxed child
+/// can reach them. Ten ports leaves headroom for http + socks +
+/// future listeners and for `EADDRINUSE` retries. Overridable via
+/// `--proxy-port-range`.
+pub const DEFAULT_PROXY_PORT_RANGE: (u16, u16) = (60080, 60089);
+
+/// Sanity cap on `--proxy-port-range` width (`high - low`). The
+/// range exists to *narrow* loopback exposure relative to the
+/// previous all-of-127/8 design; an unbounded range would defeat
+/// that.
+pub const MAX_PROXY_PORT_RANGE_WIDTH: u16 = 64;
 
 // WFP error codes we treat as benign idempotency outcomes.
 const FWP_E_ALREADY_EXISTS: u32 = 0x80320009;
@@ -243,11 +262,36 @@ fn cond_v6_addr(
     }
 }
 
+fn fwp_uint16(v: u16) -> FWP_VALUE0 {
+    FWP_VALUE0 {
+        r#type: FWP_UINT16,
+        Anonymous: FWP_VALUE0_0 { uint16: v },
+    }
+}
+
+fn cond_port_range(
+    field_key: GUID,
+    range: &mut FWP_RANGE0,
+) -> FWPM_FILTER_CONDITION0 {
+    FWPM_FILTER_CONDITION0 {
+        fieldKey: field_key,
+        matchType: FWP_MATCH_RANGE,
+        conditionValue: FWP_CONDITION_VALUE0 {
+            r#type: FWP_RANGE_TYPE,
+            Anonymous: FWP_CONDITION_VALUE0_0 {
+                rangeValue: range as *mut _,
+            },
+        },
+    }
+}
+
 // ────────────────────── filter tagging ──────────────────────
 
 /// JSON payload stored in each filter's `providerData` so we can
 /// identify our own filters during enumerate/uninstall without fixed
-/// filter GUIDs.
+/// filter GUIDs. The optional `port_range` mirrors the
+/// `IP_REMOTE_PORT` range condition on `permit-loopback` filters so
+/// `wfp status` can report it without unsafe condition-walking.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct FilterTag {
     /// Discriminator: `"srt-win"`. Anything else means the filter
@@ -256,6 +300,10 @@ pub struct FilterTag {
     /// One of `permit-nonmember`, `permit-group`, `permit-loopback`,
     /// `block`.
     pub kind: String,
+    /// `[low, high]` for `permit-loopback`; `None` otherwise (and on
+    /// pre-port-range installs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port_range: Option<[u16; 2]>,
 }
 
 impl FilterTag {
@@ -263,6 +311,14 @@ impl FilterTag {
         Self {
             tool: "srt-win".into(),
             kind: kind.into(),
+            port_range: None,
+        }
+    }
+    fn loopback(range: (u16, u16)) -> Self {
+        Self {
+            tool: "srt-win".into(),
+            kind: "permit-loopback".into(),
+            port_range: Some([range.0, range.1]),
         }
     }
     fn to_blob_bytes(&self) -> Vec<u8> {
@@ -542,10 +598,16 @@ pub fn sddl_group(group_sid: &str) -> String {
 pub const SDDL_EVERYONE: &str = "O:LSG:LSD:(A;;CC;;;WD)";
 
 /// Install (or refresh) the eight machine-wide filters under
-/// `sublayer`, keyed only on `group_sid`. Idempotent: any existing
-/// srt-win-tagged filters are deleted first, then a fresh set is
-/// added, all inside one WFP transaction.
-pub fn install_filters(sublayer: &GUID, group_sid: &str) -> Result<()> {
+/// `sublayer`, keyed only on `group_sid`. Filter 2's loopback
+/// permit is restricted to `port_range` (inclusive). Idempotent:
+/// any existing srt-win-tagged filters are deleted first, then a
+/// fresh set is added, all inside one WFP transaction.
+pub fn install_filters(
+    sublayer: &GUID,
+    group_sid: &str,
+    port_range: (u16, u16),
+) -> Result<()> {
+    debug_assert!(port_range.0 <= port_range.1);
     let sd_nonmember = OwnedSd::from_sddl(&sddl_nonmember(group_sid))
         .context("build non-member SD")?;
     let sd_group = OwnedSd::from_sddl(&sddl_group(group_sid))
@@ -610,10 +672,15 @@ pub fn install_filters(sublayer: &GUID, group_sid: &str) -> Result<()> {
             byteArray16: [0; 16],
         };
         v6_loop.byteArray16[15] = 1;
+        // remote port ∈ [low, high]
+        let mut port_range_slot = FWP_RANGE0 {
+            valueLow: fwp_uint16(port_range.0),
+            valueHigh: fwp_uint16(port_range.1),
+        };
 
         let mut tag_nm = FilterTag::new("permit-nonmember").to_blob_bytes();
         let mut tag_gp = FilterTag::new("permit-group").to_blob_bytes();
-        let mut tag_lb = FilterTag::new("permit-loopback").to_blob_bytes();
+        let mut tag_lb = FilterTag::loopback(port_range).to_blob_bytes();
         let mut tag_bk = FilterTag::new("block").to_blob_bytes();
 
         for (layer, label) in [
@@ -650,15 +717,23 @@ pub fn install_filters(sublayer: &GUID, group_sid: &str) -> Result<()> {
                 &mut tag_gp,
             )?;
 
-            // 2 — PERMIT loopback (no user condition).
-            let mut c2 = if label == "v4" {
-                [cond_v4_subnet(
+            // 2 — PERMIT loopback ∩ port-range (no user condition).
+            // Two conditions on different fieldKeys → ANDed by WFP.
+            let addr_cond = if label == "v4" {
+                cond_v4_subnet(
                     FWPM_CONDITION_IP_REMOTE_ADDRESS,
                     &mut v4_loop,
-                )]
+                )
             } else {
-                [cond_v6_addr(FWPM_CONDITION_IP_REMOTE_ADDRESS, &mut v6_loop)]
+                cond_v6_addr(FWPM_CONDITION_IP_REMOTE_ADDRESS, &mut v6_loop)
             };
+            let mut c2 = [
+                addr_cond,
+                cond_port_range(
+                    FWPM_CONDITION_IP_REMOTE_PORT,
+                    &mut port_range_slot,
+                ),
+            ];
             add_filter(
                 engine.h(),
                 sublayer,
@@ -743,10 +818,15 @@ pub fn uninstall_filters(sublayer: &GUID) -> Result<usize> {
 /// least one `permit-group` and one `block` srt-win filter exist.
 /// (We don't insist on the exact count so enterprise tooling that
 /// adds extras under the same sublayer doesn't break detection.)
+/// `port_range` is read from the first `permit-loopback` tag;
+/// `None` when no loopback filter is present or it predates the
+/// port-range design.
 #[derive(Debug, Serialize)]
 pub struct WfpStatus {
     pub state: &'static str,
     pub filters: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port_range: Option<[u16; 2]>,
 }
 
 pub fn filter_status(sublayer: &GUID) -> Result<WfpStatus> {
@@ -754,11 +834,15 @@ pub fn filter_status(sublayer: &GUID) -> Result<WfpStatus> {
     let mut filters = 0usize;
     let mut have_permit_group = false;
     let mut have_block = false;
+    let mut port_range: Option<[u16; 2]> = None;
     for_each_tagged_filter(&engine, sublayer, |_, _, tag| {
         filters += 1;
         match tag.kind.as_str() {
             "permit-group" => have_permit_group = true,
             "block" => have_block = true,
+            "permit-loopback" if port_range.is_none() => {
+                port_range = tag.port_range;
+            }
             _ => {}
         }
     })?;
@@ -767,7 +851,40 @@ pub fn filter_status(sublayer: &GUID) -> Result<WfpStatus> {
     } else {
         "absent"
     };
-    Ok(WfpStatus { state, filters })
+    Ok(WfpStatus { state, filters, port_range })
+}
+
+/// Parse a `--proxy-port-range LOW-HIGH` argument. Both ends are
+/// inclusive. Validates `low <= high` and width `<=
+/// MAX_PROXY_PORT_RANGE_WIDTH`.
+pub fn parse_port_range(s: &str) -> Result<(u16, u16)> {
+    let (lo_s, hi_s) = s
+        .split_once('-')
+        .ok_or_else(|| anyhow!("expected LOW-HIGH (e.g. 60080-60089)"))?;
+    let lo: u16 = lo_s
+        .trim()
+        .parse()
+        .map_err(|_| anyhow!("invalid low port '{lo_s}'"))?;
+    let hi: u16 = hi_s
+        .trim()
+        .parse()
+        .map_err(|_| anyhow!("invalid high port '{hi_s}'"))?;
+    if lo == 0 {
+        // Port 0 is "any" at bind time and never appears as a
+        // remote port, so it's a dead slot in the range.
+        return Err(anyhow!("low port must be >= 1"));
+    }
+    if lo > hi {
+        return Err(anyhow!("low ({lo}) > high ({hi})"));
+    }
+    if hi - lo > MAX_PROXY_PORT_RANGE_WIDTH {
+        return Err(anyhow!(
+            "range too wide ({} ports); max width {}",
+            hi - lo + 1,
+            MAX_PROXY_PORT_RANGE_WIDTH + 1
+        ));
+    }
+    Ok((lo, hi))
 }
 
 /// Parse a `--sublayer-guid` argument. Accepts braced or unbraced
@@ -818,6 +935,44 @@ mod tests {
         let bytes = t.to_blob_bytes();
         let back: FilterTag = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(t, back);
+        // port_range omitted from JSON when None (back-compat with
+        // pre-range tags).
+        assert!(!std::str::from_utf8(&bytes).unwrap().contains("port_range"));
+
+        let lb = FilterTag::loopback((60080, 60089));
+        let lb_bytes = lb.to_blob_bytes();
+        let lb_back: FilterTag = serde_json::from_slice(&lb_bytes).unwrap();
+        assert_eq!(lb, lb_back);
+        assert_eq!(lb_back.port_range, Some([60080, 60089]));
+    }
+
+    #[test]
+    fn filter_tag_parses_legacy() {
+        // A pre-port-range tag (no port_range key) must still parse.
+        let legacy = br#"{"tool":"srt-win","kind":"permit-loopback"}"#;
+        let t: FilterTag = serde_json::from_slice(legacy).unwrap();
+        assert_eq!(t.kind, "permit-loopback");
+        assert_eq!(t.port_range, None);
+    }
+
+    #[test]
+    fn parse_port_range_ok() {
+        assert_eq!(parse_port_range("60080-60089").unwrap(), (60080, 60089));
+        assert_eq!(parse_port_range(" 1 - 1 ").unwrap(), (1, 1));
+        assert_eq!(
+            parse_port_range("1-65").unwrap(),
+            (1, 1 + MAX_PROXY_PORT_RANGE_WIDTH)
+        );
+    }
+
+    #[test]
+    fn parse_port_range_rejects() {
+        assert!(parse_port_range("60089-60080").is_err()); // low>high
+        assert!(parse_port_range("1-1000").is_err()); // too wide
+        assert!(parse_port_range("60080").is_err()); // no dash
+        assert!(parse_port_range("a-b").is_err()); // not u16
+        assert!(parse_port_range("0-65536").is_err()); // overflow
+        assert!(parse_port_range("0-9").is_err()); // port 0
     }
 
     #[test]
