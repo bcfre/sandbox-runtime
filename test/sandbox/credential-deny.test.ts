@@ -1,6 +1,12 @@
 import { describe, it, expect, beforeAll, afterAll } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SandboxManager } from '../../src/sandbox/sandbox-manager.js'
@@ -218,6 +224,10 @@ describe.if(isLinux)('credential deny on Linux (bwrap)', () => {
   const SECRET_FILE = join(TEST_DIR, 'fake-netrc')
   const SECRET_DIR = join(TEST_DIR, 'fake-aws')
   const SECRET_DIR_FILE = join(SECRET_DIR, 'credentials')
+  // Symlinked credential file (dotfile-manager layout): the deny entry names
+  // the symlink, the secret bytes live at the target.
+  const SECRET_LINK_TARGET = join(TEST_DIR, 'dotfiles-netrc')
+  const SECRET_LINK = join(TEST_DIR, 'symlinked-netrc')
   const SECRET_CONTENT = 'machine github.com password hunter2'
   const DENIED_ENV_VAR = 'SRT_TEST_SECRET_TOKEN'
   const ALLOWED_ENV_VAR = 'SRT_TEST_VISIBLE_VALUE'
@@ -243,6 +253,8 @@ describe.if(isLinux)('credential deny on Linux (bwrap)', () => {
     mkdirSync(SECRET_DIR, { recursive: true })
     writeFileSync(SECRET_FILE, SECRET_CONTENT)
     writeFileSync(SECRET_DIR_FILE, SECRET_CONTENT)
+    writeFileSync(SECRET_LINK_TARGET, SECRET_CONTENT)
+    symlinkSync(SECRET_LINK_TARGET, SECRET_LINK)
 
     await SandboxManager.reset()
     await SandboxManager.initialize(
@@ -256,6 +268,7 @@ describe.if(isLinux)('credential deny on Linux (bwrap)', () => {
           files: [
             { path: SECRET_FILE, mode: 'deny' },
             { path: SECRET_DIR, mode: 'deny' },
+            { path: SECRET_LINK, mode: 'deny' },
           ],
           envVars: [{ name: DENIED_ENV_VAR, mode: 'deny' }],
         },
@@ -276,6 +289,15 @@ describe.if(isLinux)('credential deny on Linux (bwrap)', () => {
 
       expect(wrapped).toContain(`--ro-bind /dev/null ${SECRET_FILE}`)
       expect(wrapped).toContain(`--tmpfs ${SECRET_DIR}`)
+    })
+
+    it('masks the resolved target when a denied credential file is a symlink', async () => {
+      const wrapped = await SandboxManager.wrapWithSandbox('true')
+
+      // bwrap rejects symlink bind destinations, so the mask lands on the
+      // symlink's target instead of the symlink path itself.
+      expect(wrapped).toContain(`--ro-bind /dev/null ${SECRET_LINK_TARGET}`)
+      expect(wrapped).not.toContain(`--ro-bind /dev/null ${SECRET_LINK} `)
     })
 
     it('emits --unsetenv for a denied credential env var', async () => {
@@ -309,6 +331,15 @@ describe.if(isLinux)('credential deny on Linux (bwrap)', () => {
       const result = runInSandbox(wrapped)
 
       // The /dev/null mask makes the file readable but empty
+      expect(result.stdout).not.toContain('hunter2')
+      expect(result.stdout.trim()).toBe('')
+    })
+
+    it('a denied symlinked credential file reads back empty inside the sandbox', async () => {
+      const wrapped = await SandboxManager.wrapWithSandbox(`cat ${SECRET_LINK}`)
+      const result = runInSandbox(wrapped)
+
+      // The symlink resolves to the masked target inside the mount namespace
       expect(result.stdout).not.toContain('hunter2')
       expect(result.stdout.trim()).toBe('')
     })

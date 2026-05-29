@@ -689,22 +689,25 @@ function buildSandboxCommand(
 }
 
 /**
- * bwrap cannot mount over a destination that is itself a symlink — the bind
- * fails with "Can't create file at <path>" and the whole command refuses to
- * start. Read-deny destinations therefore target the symlink's resolved
- * target instead: reads through the symlink resolve to that target inside
- * the mount namespace, so the denied content stays covered. This matters for
- * credential dotfiles (~/.netrc, ~/.npmrc, …) that are commonly symlinks
- * into a dotfile manager's directory.
+ * bwrap cannot create a file bind mount point over a destination that is
+ * itself a symlink — `--ro-bind /dev/null <symlink>` fails with "Can't create
+ * file at <path>" and the whole command refuses to start. File read-deny
+ * masks therefore target the symlink's resolved target instead: reads
+ * through the symlink resolve to that target inside the mount namespace, so
+ * the denied content stays covered. This matters for credential dotfiles
+ * (~/.netrc, ~/.npmrc, …) that are commonly symlinks into a dotfile
+ * manager's directory. Directory denies (`--tmpfs`) are left on the original
+ * path: bwrap accepts those, and rewriting them would break allowRead
+ * carve-outs expressed against the symlink path (e.g. /bin on usr-merged
+ * systems).
  */
-function resolveSymlinkReadDenyDest(normalizedPath: string): string {
+function resolveSymlinkFileMaskDest(normalizedPath: string): string {
   try {
     if (fs.lstatSync(normalizedPath).isSymbolicLink()) {
       return fs.realpathSync(normalizedPath)
     }
   } catch {
-    // Dangling symlink or vanished path — keep the original; the caller's
-    // existsSync check will skip it.
+    // Dangling symlink or vanished path — keep the original.
   }
   return normalizedPath
 }
@@ -950,7 +953,7 @@ async function generateFilesystemArgs(
   // /dev/null masks on descendant files. Otherwise a file-deny listed before
   // a dir-deny in denyRead gets wiped when the ancestor tmpfs is applied.
   const normalizedDenyPaths = readDenyPaths
-    .map(p => resolveSymlinkReadDenyDest(normalizePathForSandbox(p)))
+    .map(p => normalizePathForSandbox(p))
     .sort((a, b) => a.split('/').length - b.split('/').length)
 
   for (const normalizedPath of normalizedDenyPaths) {
@@ -1018,8 +1021,11 @@ async function generateFilesystemArgs(
         )
         continue
       }
-      // For files, bind /dev/null instead of tmpfs
-      args.push('--ro-bind', '/dev/null', normalizedPath)
+      // For files, bind /dev/null instead of tmpfs. Mask the resolved target
+      // when the path is a symlink — bwrap rejects symlink bind destinations.
+      const maskDest = resolveSymlinkFileMaskDest(normalizedPath)
+      args.push('--ro-bind', '/dev/null', maskDest)
+      maskedFiles.add(maskDest)
       maskedFiles.add(normalizedPath)
     }
   }
