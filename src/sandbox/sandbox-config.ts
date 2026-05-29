@@ -131,16 +131,16 @@ const credentialModeSchema = z
   })
 
 /**
- * Schema for an environment variable name. Restricted to names that can be
- * passed safely to `env -u` (macOS) and bwrap `--unsetenv` (Linux).
+ * Schema for an environment variable name. Restricted to POSIX identifiers so
+ * the name can never be parsed as a flag by `env -u` (macOS) or bwrap
+ * `--unsetenv` (Linux).
  */
 const envVarNameSchema = z
   .string()
-  .min(1, 'Environment variable name cannot be empty')
-  .refine(val => !/[=\s\0]/.test(val), {
-    message:
-      'Environment variable name must not contain "=", whitespace, or NUL characters',
-  })
+  .regex(
+    /^[A-Za-z_][A-Za-z0-9_]*$/,
+    'Environment variable name must start with a letter or underscore and contain only letters, digits, and underscores',
+  )
 
 /**
  * Schema for a single credential file/directory entry.

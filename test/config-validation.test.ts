@@ -414,7 +414,7 @@ describe('Config Validation', () => {
       expect(result.success).toBe(false)
     })
 
-    test.each(['', 'FOO=BAR', 'FOO BAR'])(
+    test.each(['', 'FOO=BAR', 'FOO BAR', '--bind', '-u', '1FOO', 'FOO.BAR'])(
       'rejects invalid env var name: %j',
       name => {
         const result = SandboxRuntimeConfigSchema.safeParse({
@@ -426,6 +426,16 @@ describe('Config Validation', () => {
         expect(result.success).toBe(false)
       },
     )
+
+    test.each(['_FOO', 'FOO_BAR2'])('accepts valid env var name: %j', name => {
+      const result = SandboxRuntimeConfigSchema.safeParse({
+        ...base,
+        credentials: {
+          envVars: [{ name, mode: 'deny' }],
+        },
+      })
+      expect(result.success).toBe(true)
+    })
   })
 
   describe('network.tlsTerminate', () => {
