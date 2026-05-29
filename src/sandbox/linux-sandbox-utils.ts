@@ -689,6 +689,27 @@ function buildSandboxCommand(
 }
 
 /**
+ * bwrap cannot mount over a destination that is itself a symlink — the bind
+ * fails with "Can't create file at <path>" and the whole command refuses to
+ * start. Read-deny destinations therefore target the symlink's resolved
+ * target instead: reads through the symlink resolve to that target inside
+ * the mount namespace, so the denied content stays covered. This matters for
+ * credential dotfiles (~/.netrc, ~/.npmrc, …) that are commonly symlinks
+ * into a dotfile manager's directory.
+ */
+function resolveSymlinkReadDenyDest(normalizedPath: string): string {
+  try {
+    if (fs.lstatSync(normalizedPath).isSymbolicLink()) {
+      return fs.realpathSync(normalizedPath)
+    }
+  } catch {
+    // Dangling symlink or vanished path — keep the original; the caller's
+    // existsSync check will skip it.
+  }
+  return normalizedPath
+}
+
+/**
  * Generate filesystem bind mount arguments for bwrap
  */
 async function generateFilesystemArgs(
@@ -929,7 +950,7 @@ async function generateFilesystemArgs(
   // /dev/null masks on descendant files. Otherwise a file-deny listed before
   // a dir-deny in denyRead gets wiped when the ancestor tmpfs is applied.
   const normalizedDenyPaths = readDenyPaths
-    .map(p => normalizePathForSandbox(p))
+    .map(p => resolveSymlinkReadDenyDest(normalizePathForSandbox(p)))
     .sort((a, b) => a.split('/').length - b.split('/').length)
 
   for (const normalizedPath of normalizedDenyPaths) {
