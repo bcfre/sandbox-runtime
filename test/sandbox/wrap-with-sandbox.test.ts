@@ -898,6 +898,42 @@ describe('allowWrite glob suffix handling', () => {
     },
   )
 
+  // File variant of the case above: a read-denied file gets a /dev/null bind,
+  // and a denyWrite ro-bind over an ancestor would re-expose the real file.
+  // The /dev/null mask must land again after the ancestor bind.
+  it.if(isLinux)(
+    'denyRead file mask survives a denyWrite bind over an ancestor dir (Linux)',
+    async () => {
+      const parentDir = join(tmpdir(), `srt-test-file-ancestor-${Date.now()}`)
+      const secretsDir = join(parentDir, 'secrets')
+      const keyFile = join(secretsDir, 'key.pem')
+      mkdirSync(secretsDir, { recursive: true })
+      writeFileSync(keyFile, '')
+
+      try {
+        await SandboxManager.reset()
+        await SandboxManager.initialize({
+          network: { allowedDomains: [], deniedDomains: [] },
+          filesystem: {
+            denyRead: [keyFile],
+            allowWrite: [parentDir],
+            denyWrite: [secretsDir],
+          },
+        })
+
+        const result = await SandboxManager.wrapWithSandbox(command)
+
+        const bindAt = result.indexOf(`--ro-bind ${secretsDir} ${secretsDir}`)
+        const maskAt = result.lastIndexOf(`--ro-bind /dev/null ${keyFile}`)
+        expect(bindAt).toBeGreaterThan(-1)
+        expect(maskAt).toBeGreaterThan(bindAt)
+      } finally {
+        await SandboxManager.reset()
+        rmSync(parentDir, { recursive: true, force: true })
+      }
+    },
+  )
+
   // The #190 case must keep working: a denyRead tmpfs over an ancestor of an
   // allowed write path wipes denyWrite binds under that write path; they are
   // restored by emitting denyWrite after the denyRead re-binds. The tmpfs

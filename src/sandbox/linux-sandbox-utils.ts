@@ -1082,6 +1082,16 @@ async function generateFilesystemArgs(
       pushReadDenyDirMounts(args, tmpfsDir, allowedWritePaths, readAllowPaths)
     }
   }
+  // Same problem for read-denied files: the /dev/null mask landed before the
+  // denyWrite ancestor bind, so the real file is back. Re-apply the mask.
+  for (const maskedFile of maskedFiles) {
+    if (emittedDenyWriteDests.some(dest => maskedFile.startsWith(dest + '/'))) {
+      logForDebugging(
+        `[Sandbox Linux] Re-applying denyRead file mask re-exposed by denyWrite bind: ${maskedFile}`,
+      )
+      args.push('--ro-bind', '/dev/null', maskedFile)
+    }
+  }
 
   return args
 }
