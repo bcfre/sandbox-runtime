@@ -112,6 +112,81 @@ const ParentProxyConfigSchema = z.object({
 })
 
 /**
+ * Schema for the access mode of a declared credential source.
+ *
+ * - `deny` — the sandboxed process cannot read the file / does not see the
+ *   environment variable.
+ * - `mask` — reserved for credential masking; rejected until masking ships.
+ *
+ * Additional modes (e.g. a working `mask`) will be added in future releases.
+ */
+const credentialModeSchema = z
+  .enum(['deny', 'mask'])
+  .refine(mode => mode !== 'mask', {
+    message:
+      'Credential mode "mask" is not supported yet. Use "deny" to block the ' +
+      'credential inside the sandbox, or omit the entry to leave it ' +
+      'unrestricted; masking will be added in a future release.',
+  })
+
+/**
+ * Schema for an environment variable name. Restricted to POSIX identifiers so
+ * the name can never be parsed as a flag by `env -u` (macOS) or bwrap
+ * `--unsetenv` (Linux).
+ */
+const envVarNameSchema = z
+  .string()
+  .regex(
+    /^[A-Za-z_][A-Za-z0-9_]*$/,
+    'Environment variable name must start with a letter or underscore and contain only letters, digits, and underscores',
+  )
+
+/**
+ * Schema for a single credential file/directory entry.
+ */
+export const CredentialFileConfigSchema = z.object({
+  path: filesystemPathSchema.describe(
+    'Path to a credential file or directory. Supports the same path forms as ' +
+      'filesystem.denyRead (absolute paths and ~ expansion).',
+  ),
+  mode: credentialModeSchema.describe('Access mode for this path'),
+})
+
+/**
+ * Schema for a single credential environment variable entry.
+ */
+export const CredentialEnvVarConfigSchema = z.object({
+  name: envVarNameSchema.describe('Environment variable name'),
+  mode: credentialModeSchema.describe(
+    'Access mode for this environment variable',
+  ),
+})
+
+/**
+ * Credentials configuration schema for validation.
+ *
+ * Declares credential sources (files and environment variables) with a
+ * per-source mode:
+ * - `deny` blocks the source inside the sandbox (file reads are denied via the
+ *   filesystem read-deny mechanism, env vars are unset in the child).
+ *
+ * Additional modes (e.g. `mask`) will be added in future releases.
+ *
+ * Only the sources declared here are affected; the section applies no
+ * implicit restrictions beyond them.
+ */
+export const CredentialsConfigSchema = z.object({
+  files: z
+    .array(CredentialFileConfigSchema)
+    .optional()
+    .describe('Credential files or directories to protect'),
+  envVars: z
+    .array(CredentialEnvVarConfigSchema)
+    .optional()
+    .describe('Environment variables to protect'),
+})
+
+/**
  * Network configuration schema for validation
  */
 export const NetworkConfigSchema = z.object({
@@ -356,6 +431,10 @@ export const SandboxRuntimeConfigSchema = z.object({
   filesystem: FilesystemConfigSchema.describe(
     'Filesystem restrictions configuration',
   ),
+  credentials: CredentialsConfigSchema.optional().describe(
+    'Credential handling configuration. Only the explicitly declared files ' +
+      'and environment variables are restricted.',
+  ),
   ignoreViolations: IgnoreViolationsConfigSchema.optional().describe(
     'Optional configuration for ignoring specific violations',
   ),
@@ -425,6 +504,12 @@ export type MitmProxyConfig = z.infer<typeof MitmProxyConfigSchema>
 export type ParentProxyConfig = z.infer<typeof ParentProxyConfigSchema>
 export type NetworkConfig = z.infer<typeof NetworkConfigSchema>
 export type FilesystemConfig = z.infer<typeof FilesystemConfigSchema>
+export type CredentialMode = z.infer<typeof credentialModeSchema>
+export type CredentialFileConfig = z.infer<typeof CredentialFileConfigSchema>
+export type CredentialEnvVarConfig = z.infer<
+  typeof CredentialEnvVarConfigSchema
+>
+export type CredentialsConfig = z.infer<typeof CredentialsConfigSchema>
 export type IgnoreViolationsConfig = z.infer<
   typeof IgnoreViolationsConfigSchema
 >

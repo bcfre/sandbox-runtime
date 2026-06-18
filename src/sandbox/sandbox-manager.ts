@@ -7,9 +7,14 @@ import { whichSync } from '../utils/which.js'
 import { getPlatform, getWslVersion } from '../utils/platform.js'
 import * as fs from 'fs'
 import { randomBytes } from 'node:crypto'
-import type { SandboxRuntimeConfig, SeccompConfig } from './sandbox-config.js'
+import type {
+  CredentialsConfig,
+  SandboxRuntimeConfig,
+  SeccompConfig,
+} from './sandbox-config.js'
 import type {
   SandboxAskCallback,
+  CredentialRestrictionConfig,
   FsReadRestrictionConfig,
   FsWriteRestrictionConfig,
   NetworkRestrictionConfig,
@@ -550,13 +555,50 @@ function checkDependencies(ripgrepConfig?: {
   return { errors, warnings }
 }
 
+/**
+ * Build the read-deny / env-unset sets implied by the `credentials` config.
+ *
+ * Only explicitly declared sources are restricted: `mode: 'deny'` file
+ * entries join the read-deny set and `mode: 'deny'` env vars are unset.
+ * The mode filter keeps the structure ready for future non-deny modes
+ * (e.g. masking).
+ */
+function getCredentialRestrictions(
+  credentials: CredentialsConfig | undefined,
+): CredentialRestrictionConfig {
+  if (!credentials) {
+    return { denyReadPaths: [], unsetEnvVars: [] }
+  }
+
+  const files = credentials.files ?? []
+  const denyReadPaths = files.filter(f => f.mode === 'deny').map(f => f.path)
+
+  const unsetEnvVars = (credentials.envVars ?? [])
+    .filter(v => v.mode === 'deny')
+    .map(v => v.name)
+
+  return {
+    denyReadPaths: [...new Set(denyReadPaths)],
+    unsetEnvVars: [...new Set(unsetEnvVars)],
+  }
+}
+
 function getFsReadConfig(): FsReadRestrictionConfig {
   if (!config) {
     return { denyOnly: [], allowWithinDeny: [] }
   }
 
+  // Credential deny paths are unioned with the caller's denyRead — never
+  // replacing it — so explicit filesystem restrictions always survive.
+  const rawDenyRead = [
+    ...new Set([
+      ...config.filesystem.denyRead,
+      ...getCredentialRestrictions(config.credentials).denyReadPaths,
+    ]),
+  ]
+
   const denyPaths: string[] = []
-  for (const p of config.filesystem.denyRead) {
+  for (const p of rawDenyRead) {
     const stripped = removeTrailingGlobSuffix(p)
     if (getPlatform() === 'linux' && containsGlobChars(stripped)) {
       // Expand glob to concrete paths on Linux (bubblewrap doesn't support globs)
@@ -770,8 +812,20 @@ async function wrapWithSandbox(
       customConfig?.filesystem?.denyWrite ?? config?.filesystem.denyWrite ?? [],
     ),
   }
-  const rawDenyRead =
-    customConfig?.filesystem?.denyRead ?? config?.filesystem.denyRead ?? []
+  // Credential file denies and env unsets derived from the credentials
+  // section. The deny paths are unioned with the caller's denyRead — never
+  // replacing it — so explicit filesystem restrictions always survive.
+  const credentialRestrictions = getCredentialRestrictions(
+    customConfig?.credentials ?? config?.credentials,
+  )
+  const rawDenyRead = [
+    ...new Set([
+      ...(customConfig?.filesystem?.denyRead ??
+        config?.filesystem.denyRead ??
+        []),
+      ...credentialRestrictions.denyReadPaths,
+    ]),
+  ]
   const expandedDenyRead: string[] = []
   for (const p of rawDenyRead) {
     const stripped = removeTrailingGlobSuffix(p)
@@ -843,6 +897,7 @@ async function wrapWithSandbox(
         caCertPath: mitmCA?.certPath,
         readConfig,
         writeConfig,
+        unsetEnvVars: credentialRestrictions.unsetEnvVars,
         allowUnixSockets: getAllowUnixSockets(),
         allowAllUnixSockets: getAllowAllUnixSockets(),
         allowLocalBinding: getAllowLocalBinding(),
@@ -876,6 +931,7 @@ async function wrapWithSandbox(
         caCertPath: mitmCA?.certPath,
         readConfig,
         writeConfig,
+        unsetEnvVars: credentialRestrictions.unsetEnvVars,
         enableWeakerNestedSandbox: getEnableWeakerNestedSandbox(),
         allowAllUnixSockets: getAllowAllUnixSockets(),
         binShell,

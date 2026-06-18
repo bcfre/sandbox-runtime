@@ -45,6 +45,8 @@ export interface LinuxSandboxParams {
   caCertPath?: string
   readConfig?: FsReadRestrictionConfig
   writeConfig?: FsWriteRestrictionConfig
+  /** Environment variable names to unset inside the sandbox (bwrap --unsetenv) */
+  unsetEnvVars?: string[]
   enableWeakerNestedSandbox?: boolean
   allowAllUnixSockets?: boolean
   binShell?: string
@@ -695,6 +697,30 @@ function buildSandboxCommand(
 }
 
 /**
+ * bwrap cannot create a file bind mount point over a destination that is
+ * itself a symlink — `--ro-bind /dev/null <symlink>` fails with "Can't create
+ * file at <path>" and the whole command refuses to start. File read-deny
+ * binds therefore target the symlink's resolved target instead: reads
+ * through the symlink resolve to that target inside the mount namespace, so
+ * the denied content stays covered. This matters for credential dotfiles
+ * (~/.netrc, ~/.npmrc, …) that are commonly symlinks into a dotfile
+ * manager's directory. Directory denies (`--tmpfs`) are left on the original
+ * path: bwrap accepts those, and rewriting them would break allowRead
+ * carve-outs expressed against the symlink path (e.g. /bin on usr-merged
+ * systems).
+ */
+function resolveSymlinkDenyDest(normalizedPath: string): string {
+  try {
+    if (fs.lstatSync(normalizedPath).isSymbolicLink()) {
+      return fs.realpathSync(normalizedPath)
+    }
+  } catch {
+    // Dangling symlink or vanished path — keep the original.
+  }
+  return normalizedPath
+}
+
+/**
  * Mount a tmpfs over a read-denied directory, then restore the allowed write
  * paths and allowRead paths the tmpfs just wiped. Used by the denyRead loop
  * in generateFilesystemArgs and again when a late denyWrite ro-bind re-exposes
@@ -1028,8 +1054,11 @@ async function generateFilesystemArgs(
         )
         continue
       }
-      // For files, bind /dev/null instead of tmpfs
-      args.push('--ro-bind', '/dev/null', normalizedPath)
+      // For files, bind /dev/null instead of tmpfs. bwrap rejects symlink
+      // bind destinations, so the deny bind lands on the resolved target.
+      const denyDest = resolveSymlinkDenyDest(normalizedPath)
+      args.push('--ro-bind', '/dev/null', denyDest)
+      maskedFiles.add(denyDest)
       maskedFiles.add(normalizedPath)
     }
   }
@@ -1088,6 +1117,13 @@ async function generateFilesystemArgs(
   // denyWrite ancestor bind, so the real file is back. Re-apply the mask.
   for (const maskedFile of maskedFiles) {
     if (emittedDenyWriteDests.some(dest => maskedFile.startsWith(dest + '/'))) {
+      // maskedFiles holds both the symlink path and its resolved target so
+      // the denyWrite skip-check above matches either. Re-emission must go
+      // to the target only — bwrap rejects a symlink bind dest (see
+      // resolveSymlinkDenyDest), and the target is masked independently:
+      // either its original mask survived (target outside this denyWrite
+      // ancestor) or its own iteration re-emits it here.
+      if (resolveSymlinkDenyDest(maskedFile) !== maskedFile) continue
       logForDebugging(
         `[Sandbox Linux] Re-applying denyRead file mask re-exposed by denyWrite bind: ${maskedFile}`,
       )
@@ -1160,6 +1196,7 @@ export async function wrapCommandWithSandboxLinux(
     caCertPath,
     readConfig,
     writeConfig,
+    unsetEnvVars,
     enableWeakerNestedSandbox,
     allowAllUnixSockets,
     binShell,
@@ -1177,12 +1214,15 @@ export async function wrapCommandWithSandboxLinux(
   // Write: allowOnly pattern - undefined means no restrictions, any config means restrictions
   const hasReadRestrictions = readConfig && readConfig.denyOnly.length > 0
   const hasWriteRestrictions = writeConfig !== undefined
+  const hasEnvRestrictions =
+    unsetEnvVars !== undefined && unsetEnvVars.length > 0
 
   // Check if we need any sandboxing
   if (
     !needsNetworkRestriction &&
     !hasReadRestrictions &&
-    !hasWriteRestrictions
+    !hasWriteRestrictions &&
+    !hasEnvRestrictions
   ) {
     return command
   }
@@ -1223,6 +1263,17 @@ export async function wrapCommandWithSandboxLinux(
       logForDebugging(
         '[Sandbox Linux] Skipping seccomp filter - allowAllUnixSockets is enabled',
       )
+    }
+
+    // ========== ENV RESTRICTIONS ==========
+    // Drop denied credential env vars from the inherited environment. Emitted
+    // before the proxy --setenv flags below: bwrap applies env operations in
+    // argument order, so SRT's own proxy plumbing vars survive even if a
+    // caller lists one of them as a denied credential.
+    if (hasEnvRestrictions) {
+      for (const name of unsetEnvVars) {
+        bwrapArgs.push('--unsetenv', name)
+      }
     }
 
     // ========== NETWORK RESTRICTIONS ==========
@@ -1374,6 +1425,7 @@ export async function wrapCommandWithSandboxLinux(
     if (needsNetworkRestriction) restrictions.push('network')
     if (hasReadRestrictions || hasWriteRestrictions)
       restrictions.push('filesystem')
+    if (hasEnvRestrictions) restrictions.push('env')
     if (applySeccompPrefix) restrictions.push('seccomp(unix-block)')
 
     logForDebugging(

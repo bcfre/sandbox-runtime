@@ -24,6 +24,9 @@ describe('initializeLinuxNetworkBridge spawn failure', () => {
   })
 
   test('rejects without an unhandled error event when socat cannot be spawned', async () => {
+    // bun-types declares .rejects matchers as returning void, but bun returns
+    // a Promise at runtime — the await is load-bearing for the assertion.
+    // eslint-disable-next-line @typescript-eslint/await-thenable
     await expect(
       initializeLinuxNetworkBridge(0, 0, '/nonexistent-for-test/socat'),
     ).rejects.toThrow('Failed to start HTTP bridge process')

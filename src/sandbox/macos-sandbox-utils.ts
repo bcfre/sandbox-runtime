@@ -35,6 +35,8 @@ export interface MacOSSandboxParams {
   allowMachLookup?: string[]
   readConfig: FsReadRestrictionConfig | undefined
   writeConfig: FsWriteRestrictionConfig | undefined
+  /** Environment variable names to unset for the sandboxed child (env -u) */
+  unsetEnvVars?: string[]
   ignoreViolations?: IgnoreViolationsConfig | undefined
   allowPty?: boolean
   allowGitConfig?: boolean
@@ -772,6 +774,7 @@ export function wrapCommandWithSandboxMacOS(
     allowMachLookup,
     readConfig,
     writeConfig,
+    unsetEnvVars,
     allowPty,
     allowGitConfig = false,
     enableWeakerNetworkIsolation = false,
@@ -784,12 +787,15 @@ export function wrapCommandWithSandboxMacOS(
   // Write: allowOnly pattern - undefined means no restrictions, any config means restrictions
   const hasReadRestrictions = readConfig && readConfig.denyOnly.length > 0
   const hasWriteRestrictions = writeConfig !== undefined
+  const hasEnvRestrictions =
+    unsetEnvVars !== undefined && unsetEnvVars.length > 0
 
   // No sandboxing needed
   if (
     !needsNetworkRestriction &&
     !hasReadRestrictions &&
-    !hasWriteRestrictions
+    !hasWriteRestrictions &&
+    !hasEnvRestrictions
   ) {
     return command
   }
@@ -829,10 +835,16 @@ export function wrapCommandWithSandboxMacOS(
     throw new Error(`Shell '${shellName}' not found in PATH`)
   }
 
+  // Drop denied credential env vars from the inherited environment. The -u
+  // flags must precede the VAR=VALUE assignments so SRT's own proxy plumbing
+  // vars survive even if a caller lists one of them as a denied credential.
+  const unsetEnvArgs = (unsetEnvVars ?? []).flatMap(name => ['-u', name])
+
   // Use `env` command to set environment variables - each VAR=value is a separate
   // argument that shellquote handles properly, avoiding shell quoting issues
   const wrappedCommand = shellquote.quote([
     'env',
+    ...unsetEnvArgs,
     ...proxyEnvArgs,
     '/usr/bin/sandbox-exec',
     '-p',
