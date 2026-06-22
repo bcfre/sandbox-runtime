@@ -85,25 +85,36 @@ export type WindowsBinShell =
 /**
  * Adapter from the cross-platform `binShell?: string` surface
  * ({@link SandboxManager.wrapWithSandboxArgv}) to the Windows
- * discriminated union. Dispatch is on basename only. Throws on any
- * value outside the recognised set — there is no silent fallback to
- * cmd.exe.
+ * discriminated union. Throws on any value outside the recognised
+ * set — there is no silent fallback to cmd.exe.
+ *
+ * Uses `path.win32` explicitly so the function (and its unit test)
+ * is platform-independent.
  */
 export function parseWindowsBinShell(raw?: string): WindowsBinShell {
   if (raw === undefined) return { kind: 'cmd' }
-  const base = path.basename(raw).toLowerCase()
-  switch (base) {
-    case 'bash':
-    case 'bash.exe':
-    case 'sh':
-    case 'sh.exe':
-      if (!path.isAbsolute(raw)) {
-        throw new Error(
-          `binShell bash path must be absolute (got ${JSON.stringify(raw)}); ` +
-            `pass the resolved Git Bash install path`,
-        )
-      }
-      return { kind: 'bash', path: raw }
+  // bash/sh: path semantics — match on basename, keep the caller's
+  // absolute path verbatim.
+  const base = path.win32.basename(raw).toLowerCase()
+  if (
+    base === 'bash' ||
+    base === 'bash.exe' ||
+    base === 'sh' ||
+    base === 'sh.exe'
+  ) {
+    if (!path.win32.isAbsolute(raw)) {
+      throw new Error(
+        `binShell bash path must be absolute (got ${JSON.stringify(raw)}); ` +
+          `pass the resolved Git Bash install path`,
+      )
+    }
+    return { kind: 'bash', path: raw }
+  }
+  // cmd/powershell/pwsh: token semantics — match on the FULL string,
+  // not basename, so an absolute path to pwsh.exe (whose path we'd
+  // otherwise discard) falls through to the explicit throw rather
+  // than silently degrading to a PATH lookup.
+  switch (raw.toLowerCase()) {
     case 'pwsh':
     case 'pwsh.exe':
       return { kind: 'pwsh' }

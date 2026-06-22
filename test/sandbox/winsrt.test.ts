@@ -210,6 +210,35 @@ async function bindFirstFree(candidates: number[]): Promise<BoundListener> {
   )
 }
 
+describe('parseWindowsBinShell (pure, all platforms)', () => {
+  it('maps tokens/paths and rejects the rest', () => {
+    expect(parseWindowsBinShell(undefined)).toEqual({ kind: 'cmd' })
+    expect(parseWindowsBinShell('cmd')).toEqual({ kind: 'cmd' })
+    expect(parseWindowsBinShell('pwsh')).toEqual({ kind: 'pwsh' })
+    expect(parseWindowsBinShell('PowerShell')).toEqual({ kind: 'powershell' })
+    for (const p of [
+      'C:\\Program Files\\Git\\bin\\bash.exe',
+      'C:\\Program Files\\Git\\usr\\bin\\bash.exe',
+      'C:\\Program Files\\Git\\bin\\sh.exe',
+    ]) {
+      expect(parseWindowsBinShell(p)).toEqual({ kind: 'bash', path: p })
+    }
+    // Bare/relative bash token: caller must pass the resolved absolute
+    // install path (PATH-resolved 'bash' could be WSL, not Git Bash).
+    expect(() => parseWindowsBinShell('bash')).toThrow(/absolute/)
+    // Unknown values fail loud rather than silently routing to cmd.exe.
+    expect(() => parseWindowsBinShell('zsh')).toThrow(/unrecognised binShell/)
+    expect(() =>
+      parseWindowsBinShell('C:\\Program Files\\Git\\git-bash.exe'),
+    ).toThrow(/unrecognised binShell/)
+    // An absolute path to pwsh/cmd is NOT a token — reject rather than
+    // silently dropping the caller's path and degrading to PATH lookup.
+    expect(() =>
+      parseWindowsBinShell('C:\\Program Files\\PowerShell\\7\\pwsh.exe'),
+    ).toThrow(/unrecognised binShell/)
+  })
+})
+
 describe.if(isWindows)('Windows sandbox: srt-win helpers', () => {
   it('getSrtWinPath resolves to an existing binary', () => {
     const p = getSrtWinPath()
@@ -245,28 +274,6 @@ describe.if(isWindows)('Windows sandbox: srt-win helpers', () => {
     expect(argv.slice(-3)).toEqual([bashPath, '-c', cmd])
     expect(argv).not.toContain('/c')
     expect(argv.join(' ')).not.toMatch(/cmd\.exe/i)
-  })
-
-  it('parseWindowsBinShell: maps tokens/paths and rejects the rest', () => {
-    expect(parseWindowsBinShell(undefined)).toEqual({ kind: 'cmd' })
-    expect(parseWindowsBinShell('cmd')).toEqual({ kind: 'cmd' })
-    expect(parseWindowsBinShell('pwsh')).toEqual({ kind: 'pwsh' })
-    expect(parseWindowsBinShell('PowerShell')).toEqual({ kind: 'powershell' })
-    for (const p of [
-      'C:\\Program Files\\Git\\bin\\bash.exe',
-      'C:\\Program Files\\Git\\usr\\bin\\bash.exe',
-      'C:\\Program Files\\Git\\bin\\sh.exe',
-    ]) {
-      expect(parseWindowsBinShell(p)).toEqual({ kind: 'bash', path: p })
-    }
-    // Bare/relative bash token: caller must pass the resolved absolute
-    // install path (PATH-resolved 'bash' could be WSL, not Git Bash).
-    expect(() => parseWindowsBinShell('bash')).toThrow(/absolute/)
-    // Unknown values fail loud rather than silently routing to cmd.exe.
-    expect(() => parseWindowsBinShell('zsh')).toThrow(/unrecognised binShell/)
-    expect(() =>
-      parseWindowsBinShell('C:\\Program Files\\Git\\git-bash.exe'),
-    ).toThrow(/unrecognised binShell/)
   })
 
   it('getWindowsWfpStatus reports absent for a never-installed sublayer', () => {
