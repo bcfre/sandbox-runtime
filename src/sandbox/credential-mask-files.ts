@@ -73,6 +73,10 @@ export class MaskedFileStore {
       fakePath = join(this.dir, `${this.byKey.size}.fake`)
       this.byKey.set(key, fakePath)
     }
+    // Never follow a symlink at fakePath: a prior sandbox invocation may
+    // have planted one (the store dir is ro-bound now, but defence in
+    // depth). Unlink first so writeFileSync creates a fresh regular file.
+    fs.rmSync(fakePath, { force: true })
     // 0600: owner rw so the idempotent rewrite above succeeds; the bind
     // into the sandbox is --ro-bind so the sandboxed process sees it
     // read-only regardless of the host mode. No group/other.
