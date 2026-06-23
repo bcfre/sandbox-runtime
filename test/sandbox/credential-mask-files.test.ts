@@ -26,6 +26,7 @@ import {
 } from '../../src/sandbox/credential-sentinel.js'
 import { SandboxManager } from '../../src/sandbox/sandbox-manager.js'
 import type { SandboxRuntimeConfig } from '../../src/sandbox/sandbox-config.js'
+import { wrapCommandWithSandboxMacOS } from '../../src/sandbox/macos-sandbox-utils.js'
 import { isLinux } from '../helpers/platform.js'
 
 /**
@@ -193,6 +194,39 @@ describe('buildMaskedFileBinds', () => {
     )
     expect(binds).toHaveLength(0)
     store.dispose()
+  })
+})
+
+/**
+ * macOS: SBPL cannot redirect a read, so a masked file degrades to a
+ * (deny file-read* …) rule — same profile output as mode: "deny". The
+ * fakePath is unused. Pure string assertion; runs on any platform.
+ */
+describe('file masking on macOS degrades to read-deny', () => {
+  test('profile contains (deny file-read* …) for the masked path', () => {
+    const wrapped = wrapCommandWithSandboxMacOS({
+      command: 'true',
+      needsNetworkRestriction: false,
+      readConfig: undefined,
+      writeConfig: { allowOnly: ['/tmp'], denyWithinAllow: [] },
+      maskedFileBinds: [{ realPath: TOKEN_FILE, fakePath: '/unused' }],
+    })
+    expect(wrapped).toContain('deny file-read*')
+    expect(wrapped).toContain(TOKEN_FILE)
+    // The fake path never reaches the profile — SBPL can't bind-mount.
+    expect(wrapped).not.toContain('/unused')
+  })
+
+  test('still sandboxes when masked files are the only restriction', () => {
+    const wrapped = wrapCommandWithSandboxMacOS({
+      command: 'echo hi',
+      needsNetworkRestriction: false,
+      readConfig: undefined,
+      writeConfig: undefined,
+      maskedFileBinds: [{ realPath: TOKEN_FILE, fakePath: '/unused' }],
+    })
+    expect(wrapped).not.toBe('echo hi')
+    expect(wrapped).toContain('deny file-read*')
   })
 })
 
