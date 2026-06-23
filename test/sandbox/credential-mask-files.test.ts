@@ -97,7 +97,7 @@ describe('buildMaskedFileBinds', () => {
   test('registers a sentinel keyed on file path and writes it to a fake', () => {
     const reg = new SentinelRegistry()
     const store = new MaskedFileStore()
-    const binds = buildMaskedFileBinds(
+    const { binds } = buildMaskedFileBinds(
       [{ path: TOKEN_FILE, mode: 'mask' }],
       ['api.github.com'],
       reg,
@@ -117,7 +117,7 @@ describe('buildMaskedFileBinds', () => {
   test('a file sentinel only substitutes at its own injectHosts', () => {
     const reg = new SentinelRegistry()
     const store = new MaskedFileStore()
-    const binds = buildMaskedFileBinds(
+    const { binds } = buildMaskedFileBinds(
       [{ path: TOKEN_FILE, mode: 'mask', injectHosts: ['api.github.com'] }],
       ['api.github.com', 'evil.example.com'],
       reg,
@@ -139,7 +139,7 @@ describe('buildMaskedFileBinds', () => {
   test('absent injectHosts → defaults to allowedDomains', () => {
     const reg = new SentinelRegistry()
     const store = new MaskedFileStore()
-    const binds = buildMaskedFileBinds(
+    const { binds } = buildMaskedFileBinds(
       [{ path: TOKEN_FILE, mode: 'mask' }],
       ['fallback.example.com'],
       reg,
@@ -156,13 +156,14 @@ describe('buildMaskedFileBinds', () => {
   test('skips a masked file that does not exist on the host', () => {
     const reg = new SentinelRegistry()
     const store = new MaskedFileStore()
-    const binds = buildMaskedFileBinds(
+    const { binds, degradeToDenyPaths } = buildMaskedFileBinds(
       [{ path: join(FIXTURE_DIR, 'no-such-file'), mode: 'mask' }],
       [],
       reg,
       store,
     )
     expect(binds).toHaveLength(0)
+    expect(degradeToDenyPaths).toHaveLength(0)
     expect(reg.size).toBe(0)
     // No fake was written → store dir was never created.
     expect(store.dirPath).toBeUndefined()
@@ -172,7 +173,7 @@ describe('buildMaskedFileBinds', () => {
   test('skips a masked entry that resolves to a directory', () => {
     const reg = new SentinelRegistry()
     const store = new MaskedFileStore()
-    const binds = buildMaskedFileBinds(
+    const { binds } = buildMaskedFileBinds(
       [{ path: SUBDIR, mode: 'mask' }],
       [],
       reg,
@@ -186,7 +187,7 @@ describe('buildMaskedFileBinds', () => {
   test('ignores deny-mode entries', () => {
     const reg = new SentinelRegistry()
     const store = new MaskedFileStore()
-    const binds = buildMaskedFileBinds(
+    const { binds } = buildMaskedFileBinds(
       [{ path: TOKEN_FILE, mode: 'deny' }],
       [],
       reg,

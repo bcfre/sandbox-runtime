@@ -184,10 +184,32 @@ export class MaskedFileStore {
   }
 }
 
+/** Result of {@link buildMaskedFileBinds}. */
+export interface MaskedFileBuildResult {
+  binds: MaskedFileBind[]
+  /**
+   * Resolved paths of `mode: "mask"` entries that degraded to deny at
+   * runtime — currently only the `extract`-with-no-match case. Callers
+   * union these into the read-deny set so the credential file is
+   * unreadable rather than exposed.
+   */
+  degradeToDenyPaths: string[]
+}
+
 /**
  * For each `mode: "mask"` file entry: resolve the path, read the real
- * content, register `(file:<path>, content, injectHosts)` in `registry`,
- * write the sentinel to a fake file via `store`, and return the bind list.
+ * content, build the fake content (whole-file or structured per `extract`),
+ * register sentinels in `registry`, write the fake via `store`, and return
+ * the bind list plus any entries that degraded to deny.
+ *
+ * Whole-file mode (no `extract`): one sentinel keyed `file:<path>` whose
+ * real value is the entire file content; the fake file *is* the sentinel.
+ *
+ * Structured mode (`extract` set): one sentinel per distinct captured
+ * value, keyed `file:<path>#<i>`; the fake file is the real content with
+ * each captured span replaced by its sentinel. If the regex matches
+ * nothing the entry **degrades to deny** — fail-closed, because a wrong
+ * pattern would otherwise bind the real file unmodified.
  *
  * Entries whose path does not exist, is unreadable, or resolves to a
  * directory are skipped with a debug log — same posture as a masked env
@@ -202,8 +224,9 @@ export function buildMaskedFileBinds(
   allowedDomains: readonly string[],
   registry: SentinelRegistry,
   store: MaskedFileStore,
-): MaskedFileBind[] {
+): MaskedFileBuildResult {
   const binds: MaskedFileBind[] = []
+  const degradeToDenyPaths: string[] = []
   for (const f of files) {
     if (f.mode !== 'mask') continue
     const realPath = normalizePathForSandbox(f.path)
@@ -230,11 +253,36 @@ export function buildMaskedFileBinds(
 
     const injectHosts = f.injectHosts ?? allowedDomains
     const key = FILE_KEY_PREFIX + realPath
-    const sentinel = registry.register(key, content, injectHosts)
-    const fakePath = store.write(key, sentinel)
+
+    let fakeContent: string
+    if (f.extract === undefined) {
+      // Whole-file: one sentinel for the entire content.
+      fakeContent = registry.register(key, content, injectHosts)
+    } else {
+      const extracted = extractAndSubstitute(content, f.extract)
+      if (extracted === null) {
+        // Fail-closed: a non-matching extract pattern must not result in
+        // the real file being bound unmodified. Degrade to deny so the
+        // sandboxed process cannot read the credential at all.
+        logForDebugging(
+          `[credential-mask] extract pattern /${f.extract}/ matched ` +
+            `nothing in ${f.path} — degrading to mode "deny".`,
+          { level: 'warn' },
+        )
+        degradeToDenyPaths.push(realPath)
+        continue
+      }
+      fakeContent = extracted.fakeContent
+      for (const [i, cap] of extracted.captures.entries()) {
+        const sentinel = registry.register(`${key}#${i}`, cap, injectHosts)
+        fakeContent = fakeContent.split(extractPlaceholder(i)).join(sentinel)
+      }
+    }
+
+    const fakePath = store.write(key, fakeContent)
     binds.push({ realPath, fakePath })
   }
-  return binds
+  return { binds, degradeToDenyPaths }
 }
 
 export const MASKED_FILE_STORE_PREFIX = 'srt-credmask-'
