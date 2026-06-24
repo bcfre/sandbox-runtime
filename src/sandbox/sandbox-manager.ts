@@ -629,8 +629,8 @@ function getCredentialRestrictions(
   // write it to a fake file in the manager-owned temp dir. Missing/unreadable
   // entries are skipped (same posture as an unset masked env var).
   // degradeToDenyPaths carries paths whose extract pattern matched
-  // nothing — merged into denyReadPaths below so both the read-deny
-  // config and the platform builders see them.
+  // nothing with onExtractNoMatch: "deny" — merged into denyReadPaths
+  // below so both the read-deny config and the platform builders see them.
   const { binds: maskedFileBinds, degradeToDenyPaths } = buildMaskedFileBinds(
     files,
     allowedDomains ?? [],
