@@ -51,57 +51,80 @@ describe('quote', () => {
     expect(quote(["don't"])).toBe(`'don'"'"'t'`)
   })
 
-  // The round-trip contract: parsing the quoted string with a real POSIX
+  // The round-trip contract: re-parsing the quoted string with a real POSIX
   // shell must yield exactly the original argument list. This is the test
-  // that would have caught the `!` bug. It needs a `bash` on PATH.
-  describe.skipIf(whichSync('bash') === null)(
-    'round-trips through bash',
+  // that would have caught the `!` bug on day one. It runs against EVERY
+  // POSIX shell available on the machine, not just bash: the wrapper is
+  // executed via the caller-supplied `binShell` (frequently zsh on macOS),
+  // and zsh has word-position semantics bash does not — e.g. "equals
+  // expansion" rewrites or aborts an unquoted word starting with `=` — so a
+  // bash-only round-trip structurally cannot detect a zsh-only bug.
+  const SHELLS = ['bash', 'zsh', 'sh', 'dash']
+    .map(name => whichSync(name))
+    .filter(path => path !== null)
+
+  describe.skipIf(SHELLS.length === 0)(
+    'round-trips through a real shell',
     () => {
       /**
-       * Runs `bash -c` on `quote(['printf', '%s\0', ...args])` and splits the
-       * NUL-delimited output back into an argument list. printf appends a
-       * trailing NUL, hence the final slice.
+       * Runs `<shell> -c` on `quote(['printf', '%s\0', ...args])` and splits
+       * the NUL-delimited output back into an argument list. printf appends
+       * a trailing NUL, hence the final slice.
        */
-      function roundTrip(args: string[]): string[] {
+      function roundTrip(shell: string, args: string[]): string[] {
         const result = spawnSync(
-          'bash',
+          shell,
           ['-c', quote(['printf', '%s\\0', ...args])],
-          {
-            encoding: 'utf8',
-          },
+          { encoding: 'utf8' },
         )
         expect(result.status).toBe(0)
         return result.stdout.split('\0').slice(0, -1)
       }
 
-      it('preserves every shell metacharacter byte for byte', () => {
-        const args = [
-          'if (!ok) { throw new Error("bad") }',
-          'a != b',
-          '!seen[$0]++',
-          "don't",
-          '$HOME `id` $(id)',
-          '* ? [a-z] ~ # | & ; < > ( )',
-          'back\\slash',
-          'new\nline',
-          'tab\there',
-          '!',
-          '',
-        ]
-        expect(roundTrip(args)).toEqual(args)
-      })
+      for (const shell of SHELLS) {
+        describe(shell, () => {
+          it('preserves every shell metacharacter byte for byte', () => {
+            const args = [
+              'if (!ok) { throw new Error("bad") }',
+              'a != b',
+              '!seen[$0]++',
+              "don't",
+              '$HOME `id` $(id)',
+              '* ? [a-z] ~ # | & ; < > ( )',
+              'back\\slash',
+              'new\nline',
+              'tab\there',
+              '!',
+              '',
+            ]
+            expect(roundTrip(shell, args)).toEqual(args)
+          })
 
-      it('property: quote() round-trips any printable-ASCII argv', () => {
-        fc.assert(
-          fc.property(
-            fc.array(fc.string(), { minLength: 1, maxLength: 6 }),
-            args => {
-              expect(roundTrip(args)).toEqual(args)
-            },
-          ),
-          { numRuns: 60 },
-        )
-      })
+          it('quotes a leading `=` so zsh equals-expansion cannot fire', () => {
+            // zsh rewrites an UNQUOTED word starting with `=` to a command
+            // path (`=ls` -> /bin/ls) and aborts the entire command line for
+            // an unknown name. quote() must therefore never emit a bare
+            // leading-`=` word; `=` elsewhere (A=b) stays bare.
+            const args = ['=ls', '=definitely-not-a-command', '==', '=', 'A=b']
+            expect(roundTrip(shell, args)).toEqual(args)
+          })
+
+          // Each fast-check sample spawns one real shell process, so cap the
+          // run count and give the test an explicit budget — the default 5s
+          // per-test timeout is not enough on a loaded CI runner.
+          it('property: any printable-ASCII argv round-trips exactly', () => {
+            fc.assert(
+              fc.property(
+                fc.array(fc.string(), { minLength: 1, maxLength: 6 }),
+                args => {
+                  expect(roundTrip(shell, args)).toEqual(args)
+                },
+              ),
+              { numRuns: 25 },
+            )
+          }, 30_000)
+        })
+      }
     },
   )
 })

@@ -31,8 +31,13 @@ export function quote(args: readonly string[]): string {
       }
       // Bare fast path: nothing in this character set is special to a
       // POSIX shell (no whitespace, globs, expansions, quotes, or
-      // operators), so the bare word re-parses to exactly itself.
-      if (/^[A-Za-z0-9_./:=@+,-]+$/.test(arg)) {
+      // operators), so the bare word re-parses to exactly itself. The one
+      // position-sensitive case is a LEADING "=": zsh (a common binShell,
+      // even non-interactive `zsh -c`) performs "equals expansion" on an
+      // unquoted word starting with "=" (`=ls` becomes /bin/ls; an unknown
+      // name aborts the whole command line), so such a word must be quoted.
+      // "=" elsewhere in the word (NAME=value env assignments) is fine.
+      if (/^[A-Za-z0-9_./:@+,-][A-Za-z0-9_./:=@+,-]*$/.test(arg)) {
         return arg
       }
       return "'" + arg.replace(/'/g, `'"'"'`) + "'"
