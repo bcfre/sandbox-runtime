@@ -1,0 +1,65 @@
+name: Bundle Repository
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Create git bundle
+        id: bundle
+        run: |
+          set -euo pipefail
+
+          DATE="$(date +%Y%m%d)"
+          SHORT_SHA="$(git rev-parse --short HEAD)"
+          BUNDLE_NAME="opensandbox-bundle-${DATE}-${SHORT_SHA}.bundle"
+          TAG_NAME="bundle/${DATE}-${SHORT_SHA}"
+
+          git bundle create "$BUNDLE_NAME" --all
+
+          BUNDLE_SIZE="$(du -h "$BUNDLE_NAME" | cut -f1)"
+
+          echo "bundle_name=${BUNDLE_NAME}" >> "$GITHUB_OUTPUT"
+          echo "tag_name=${TAG_NAME}" >> "$GITHUB_OUTPUT"
+          echo "date=${DATE}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
+          echo "Bundle created: ${BUNDLE_NAME} (${BUNDLE_SIZE})"
+
+      - name: Create release and upload bundle
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BUNDLE_NAME: ${{ steps.bundle.outputs.bundle_name }}
+          TAG_NAME: ${{ steps.bundle.outputs.tag_name }}
+          DATE: ${{ steps.bundle.outputs.date }}
+          SHORT_SHA: ${{ steps.bundle.outputs.short_sha }}
+        run: |
+          set -euo pipefail
+
+          gh release create "$TAG_NAME" "$BUNDLE_NAME" \
+            --title "Git Bundle ${DATE}-${SHORT_SHA}" \
+            --notes "Full git bundle generated on ${DATE} at commit \`${SHORT_SHA}\`.
+
+          | Item | Value |
+          |------|-------|
+          | Date | ${DATE} |
+          | Commit | \`${SHORT_SHA}\` |
+          | Bundle | \`${BUNDLE_NAME}\` |
+
+          **Usage:**
+          ```bash
+          git clone ${BUNDLE_NAME} /path/to/repo
+          cd /path/to/repo
+          git remote add origin <original-url>
+          git fetch origin
+          ```"
